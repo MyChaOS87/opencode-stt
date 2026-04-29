@@ -2,7 +2,7 @@
  * Configuration types for the speech-to-text plugin.
  */
 
-export type SttBackend = "moonshine" | "whisper" | "faster-whisper" | "auto";
+export type SttBackend = "vllm" | "moonshine" | "whisper" | "faster-whisper" | "auto";
 
 export type MoonshineModel = "tiny" | "base";
 export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large";
@@ -49,6 +49,13 @@ export interface SpeechToTextConfig {
    * If not provided, uses the bundled script.
    */
   scriptPath?: string;
+
+  /**
+   * URL of vLLM server.
+   * Only used when backend is "vllm" or "auto" and a vLLM server is available.
+   * @default "http://localhost:8080"
+   */
+  vllmUrl?: string;
 }
 
 export interface SttResult {
@@ -66,4 +73,5 @@ export const DEFAULT_CONFIG: Required<SpeechToTextConfig> = {
   maxDuration: 30,
   pythonPath: "python3",
   scriptPath: "",
+  vllmUrl: "http://localhost:8080",
 };

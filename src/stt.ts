@@ -30,6 +30,7 @@ export async function transcribe(config: SpeechToTextConfig = {}): Promise<SttRe
     "--model", mergedConfig.model,
     "--language", mergedConfig.language,
     "--duration", mergedConfig.maxDuration.toString(),
+    "--vllm-url", mergedConfig.vllmUrl,
   ];
 
   return new Promise((resolve, reject) => {
@@ -80,11 +81,14 @@ export async function transcribe(config: SpeechToTextConfig = {}): Promise<SttRe
 /**
  * Check which STT backends are available.
  */
-export async function listBackends(pythonPath: string = "python3"): Promise<string[]> {
+export async function listBackends(
+  pythonPath: string = "python3",
+  vllmUrl: string = "http://localhost:8080"
+): Promise<string[]> {
   const scriptPath = getScriptPath();
   
   return new Promise((resolve) => {
-    const process = spawn(pythonPath, [scriptPath, "--list-backends"], {
+    const process = spawn(pythonPath, [scriptPath, "--list-backends", "--vllm-url", vllmUrl], {
       stdio: ["inherit", "pipe", "pipe"],
     });
 

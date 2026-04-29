@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Speech-to-Text backend for OpenCode plugin.
-Supports Moonshine (recommended) and Whisper models.
+Supports vLLM (Voxtral/Mistral), Moonshine, and Whisper models.
 
 Usage:
-    python stt.py [--backend moonshine|whisper|faster-whisper] [--model tiny|base] [--duration 10] [--language en]
+    python stt.py [--backend vllm|moonshine|whisper|faster-whisper] [--model tiny|base] [--duration 10] [--language en] [--vllm-url URL]
 
 Output:
     JSON with transcription result to stdout
@@ -25,9 +25,25 @@ warnings.filterwarnings("ignore")
 SAMPLE_RATE = 16000  # 16kHz for speech recognition
 
 
-def get_available_backend():
+def check_vllm_server(url: str = "http://localhost:8080") -> bool:
+    """Check if vLLM server is running."""
+    try:
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(f"{url}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def get_available_backend(vllm_url: str = "http://localhost:8080"):
     """Detect which STT backend is available."""
     backends = []
+    
+    # Check for vLLM server
+    if check_vllm_server(vllm_url):
+        backends.append("vllm")
     
     try:
         import moonshine_onnx
@@ -138,11 +154,78 @@ def transcribe_faster_whisper(audio_path: str, model: str = "tiny", language: st
     return " ".join([segment.text for segment in segments]).strip()
 
 
+def transcribe_vllm(audio_path: str, server_url: str = "http://localhost:8080") -> str:
+    """
+    Transcribe using local vLLM server via the OpenAI audio transcriptions endpoint.
+    
+    Uses /v1/audio/transcriptions (Whisper-compatible multipart form), which is the
+    correct endpoint for Voxtral and other transcription-task models served by vLLM.
+    The chat completions endpoint does NOT work for transcription models.
+    
+    Args:
+        audio_path: Path to audio file
+        server_url: URL of vLLM server (default: http://localhost:8080)
+    
+    Returns:
+        Transcribed text
+    """
+    import urllib.request
+    import urllib.error
+    import mimetypes
+    
+    # Build a multipart/form-data body manually (no external deps)
+    boundary = "----VoxtralBoundary"
+    
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
+    
+    mime_type = mimetypes.guess_type(audio_path)[0] or "audio/wav"
+    filename = os.path.basename(audio_path)
+    
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n\r\n'
+        f"default\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {mime_type}\r\n\r\n"
+    ).encode("utf-8") + audio_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+    }
+    
+    try:
+        req = urllib.request.Request(
+            f"{server_url}/v1/audio/transcriptions",
+            data=body,
+            headers=headers,
+            method="POST"
+        )
+        
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            # OpenAI transcription response: {"text": "..."}
+            if 'text' in result:
+                return result['text'].strip()
+            else:
+                raise Exception(f"Unexpected response format: {result}")
+                
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        raise Exception(f"vLLM server error: {e.code} - {error_body}")
+    except urllib.error.URLError as e:
+        raise Exception(f"Cannot connect to vLLM server at {server_url}. Is vLLM running?")
+    except Exception as e:
+        raise Exception(f"vLLM transcription failed: {str(e)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Speech-to-Text for OpenCode")
     parser.add_argument(
         "--backend",
-        choices=["moonshine", "whisper", "faster-whisper", "auto"],
+        choices=["vllm", "moonshine", "whisper", "faster-whisper", "auto"],
         default="auto",
         help="STT backend to use (default: auto-detect)"
     )
@@ -171,30 +254,37 @@ def main():
         action="store_true",
         help="List available backends and exit"
     )
+    parser.add_argument(
+        "--vllm-url",
+        default="http://localhost:8080",
+        help="URL of vLLM server (default: http://localhost:8080)"
+    )
     
     args = parser.parse_args()
     
     # List backends if requested
     if args.list_backends:
-        backends = get_available_backend()
+        backends = get_available_backend(args.vllm_url)
         print(json.dumps({"available_backends": backends}))
         return
     
     # Auto-detect backend
-    available = get_available_backend()
+    available = get_available_backend(args.vllm_url)
     
     if not available:
         print(json.dumps({
             "success": False,
-            "error": "No STT backend available. Install moonshine-onnx, whisper, or faster-whisper.",
+            "error": "No STT backend available. Start vLLM server, or install moonshine-onnx, whisper, or faster-whisper.",
             "available_backends": []
         }))
         sys.exit(1)
     
     backend = args.backend
     if backend == "auto":
-        # Prefer moonshine, then faster-whisper, then whisper
-        if "moonshine" in available:
+        # Prefer vllm (GPU-accelerated), then moonshine, then faster-whisper, then whisper
+        if "vllm" in available:
+            backend = "vllm"
+        elif "moonshine" in available:
             backend = "moonshine"
         elif "faster-whisper" in available:
             backend = "faster-whisper"
@@ -219,7 +309,9 @@ def main():
             temp_file = True
         
         # Transcribe
-        if backend == "moonshine":
+        if backend == "vllm":
+            text = transcribe_vllm(audio_path, args.vllm_url)
+        elif backend == "moonshine":
             text = transcribe_moonshine(audio_path, args.model)
         elif backend == "faster-whisper":
             text = transcribe_faster_whisper(audio_path, args.model, args.language)
@@ -230,11 +322,16 @@ def main():
         if temp_file:
             os.unlink(audio_path)
         
+        # Determine model name for response
+        model_name = args.model
+        if backend == "vllm":
+            model_name = "vllm"
+        
         print(json.dumps({
             "success": True,
             "text": text,
             "backend": backend,
-            "model": args.model
+            "model": model_name
         }))
         
     except Exception as e:
